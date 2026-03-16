@@ -1,0 +1,57 @@
+# Backend Dockerfile for production - Simplified version
+
+# Proxy arguments (passed from docker-compose)
+ARG HTTP_PROXY
+ARG HTTPS_PROXY
+ARG http_proxy
+ARG https_proxy
+
+FROM python:3.11-slim
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HTTP_PROXY=${HTTP_PROXY} \
+    HTTPS_PROXY=${HTTPS_PROXY} \
+    http_proxy=${http_proxy} \
+    https_proxy=${https_proxy}
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install UV package manager (specific version for stability)
+COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
+
+WORKDIR /app
+
+# Copy project files
+COPY pyproject.toml .
+COPY app/ ./app/
+COPY alembic/ ./alembic/
+COPY alembic.ini .
+
+# Create virtual environment and install dependencies directly
+RUN uv venv && \
+    uv pip install fastapi==0.115.6 uvicorn==0.34.0 gunicorn==23.0.0 \
+    sqlalchemy==2.0.36 asyncpg==0.30.0 alembic==1.14.0 \
+    pydantic==2.10.4 pydantic-settings==2.7.0 \
+    python-multipart==0.0.19 httpx==0.28.0 \
+    celery==5.4.0 redis==5.2.0 psycopg2-binary==2.9.10 \
+    python-dateutil==2.9.0.post0
+
+# Add venv bin to PATH
+ENV PATH="/app/.venv/bin:$PATH"
+
+# Expose port
+EXPOSE 8000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8000/health || exit 1
+
+# Run application
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
