@@ -13,6 +13,8 @@ from app.models.paper import Paper
 from app.schemas.paper import (
     BibTeXResponse,
     BibtexParseResponse,
+    DoiDiffResponse,
+    FieldDiff,
     PaperCreate,
     PaperListResponse,
     PaperResponse,
@@ -22,19 +24,51 @@ from app.schemas.paper import (
 router = APIRouter()
 
 
+@router.get("/check-doi", response_model=dict)
+async def check_doi_exists(
+    doi: str = Query(..., description="DOI to check"),
+    db: DbSession = Depends(),
+) -> dict:
+    """Check if a paper with the given DOI already exists in the database."""
+    from sqlalchemy import select
+    from app.models.paper import Paper
+
+    # Clean DOI for comparison
+    clean_doi = doi.strip()
+    if clean_doi.startswith('https://doi.org/'):
+        clean_doi = clean_doi.replace('https://doi.org/', '')
+    elif clean_doi.startswith('doi:'):
+        clean_doi = clean_doi.replace('doi:', '').strip()
+
+    # Check if paper exists
+    query = select(Paper).where(Paper.doi == clean_doi)
+    result = await db.execute(query)
+    existing_paper = result.scalar_one_or_none()
+
+    if existing_paper:
+        return {
+            "exists": True,
+            "paper_id": str(existing_paper.id),
+            "title": existing_paper.title,
+            "message": "该文献已存在，无法重复添加"
+        }
+
+    return {"exists": False, "message": "DOI 可用"}
+
+
 @router.get("/fetch-doi", response_model=BibtexParseResponse)
 async def fetch_doi_metadata(doi: str = Query(..., description="DOI to fetch metadata for")) -> BibtexParseResponse:
     """Fetch metadata from Crossref API using DOI."""
     from app.services.doi_fetcher import DOIMetadataFetcher
-    
+
     result = await DOIMetadataFetcher.fetch_by_doi(doi)
-    
+
     if not result:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Could not fetch metadata for DOI: {doi}"
         )
-    
+
     return BibtexParseResponse(**result)
 
 
@@ -77,7 +111,7 @@ async def list_papers(
     db: DbSession,
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
-    journal: str | None = None,
+    journal: list[str] | None = Query(None, description="Filter by journal(s) - supports multiple"),
     year: int | None = None,
     has_pdf: bool | None = None,
 ) -> PaperListResponse:
@@ -96,9 +130,17 @@ async def list_papers(
     conditions = []
     params = {}
     
+    # Support multiple journals (OR logic - union)
     if journal:
-        conditions.append("LOWER(p.journal) = LOWER(:journal)")
-        params['journal'] = journal
+        if len(journal) == 1:
+            conditions.append("LOWER(p.journal) = LOWER(:journal)")
+            params['journal'] = journal[0]
+        else:
+            # Multiple journals - use IN clause for OR logic
+            journal_placeholders = [f":journal_{i}" for i in range(len(journal))]
+            conditions.append(f"LOWER(p.journal) IN ({', '.join(journal_placeholders)})")
+            for i, j in enumerate(journal):
+                params[f'journal_{i}'] = j.lower()
     
     if year:
         conditions.append("p.year = :year")
@@ -158,6 +200,62 @@ async def list_papers(
 async def get_paper(paper: PaperDependency) -> Paper:
     """Get a specific paper by ID."""
     return paper
+
+
+@router.get("/{paper_id}/doi-diff", response_model=DoiDiffResponse)
+async def get_doi_diff(
+    paper: PaperDependency,
+    doi: str = Query(..., description="DOI to compare with"),
+) -> DoiDiffResponse:
+    """Compare current paper data with DOI fetched metadata."""
+    from app.services.doi_fetcher import DOIMetadataFetcher
+    
+    # Fetch new metadata from DOI
+    result = await DOIMetadataFetcher.fetch_by_doi(doi)
+    
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Could not fetch metadata for DOI: {doi}"
+        )
+    
+    # Define fields to compare
+    fields_to_compare = [
+        ("title", paper.title, result.get("title")),
+        ("authors", 
+         ", ".join([a.get("name", "") for a in paper.authors]) if paper.authors else None,
+         ", ".join([a.get("name", "") for a in result.get("authors", [])]) if result.get("authors") else None),
+        ("journal", paper.journal, result.get("journal")),
+        ("year", str(paper.year) if paper.year else None, str(result.get("year")) if result.get("year") else None),
+        ("volume", paper.volume, result.get("volume")),
+        ("number", paper.number, result.get("number")),
+        ("pages", paper.pages, result.get("pages")),
+        ("abstract", paper.abstract, result.get("abstract")),
+        ("keywords", 
+         ", ".join(paper.keywords) if paper.keywords else None,
+         ", ".join(result.get("keywords", [])) if result.get("keywords") else None),
+    ]
+    
+    # Find differences
+    differences = []
+    for field_name, current_val, new_val in fields_to_compare:
+        # Normalize values for comparison
+        current_normalized = (current_val or "").strip() if current_val else ""
+        new_normalized = (new_val or "").strip() if new_val else ""
+        
+        # Only include if new value exists and is different from current
+        if new_normalized and current_normalized != new_normalized:
+            differences.append(FieldDiff(
+                field=field_name,
+                current_value=current_val if current_val else None,
+                new_value=new_val if new_val else None
+            ))
+    
+    return DoiDiffResponse(
+        has_differences=len(differences) > 0,
+        differences=differences,
+        new_data=result
+    )
 
 
 @router.put("/{paper_id}", response_model=PaperResponse)
@@ -231,9 +329,6 @@ async def upload_pdf(
     await db.refresh(paper)
     
     return paper
-
-
-
 
 
 @router.get("/{paper_id}/pdf")

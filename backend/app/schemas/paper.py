@@ -133,3 +133,19 @@ class BibtexParseResponse(PaperBase):
     """Schema for parsed BibTeX data."""
 
     pass
+
+
+class FieldDiff(BaseModel):
+    """Schema for field difference."""
+
+    field: str
+    current_value: str | None
+    new_value: str | None
+
+
+class DoiDiffResponse(BaseModel):
+    """Schema for DOI diff response."""
+
+    has_differences: bool
+    differences: list[FieldDiff]
+    new_data: dict

@@ -1,16 +1,62 @@
-import { Outlet, Link, useLocation } from 'react-router-dom'
-import { BookOpen, FileText, Search, Home, Sparkles } from 'lucide-react'
+import { useState } from 'react'
+import { Outlet, Link, useLocation, useNavigate, useSearchParams } from 'react-router-dom'
+import { BookOpen, FileText, Sparkles } from 'lucide-react'
 import { Toaster } from 'sonner'
+import Sidebar from './components/Sidebar'
 
 export default function App() {
   const location = useLocation()
+  const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false)
+  const isHomePage = location.pathname === '/'
 
   const navItems = [
     { path: '/', label: '文献列表', icon: FileText },
-    { path: '/search', label: '搜索', icon: Search },
   ]
 
   const isActive = (path: string) => location.pathname === path
+
+  const handleSidebarJournalFilter = (journal: string) => {
+    // Toggle journal filter (add or remove)
+    const newParams = new URLSearchParams(searchParams)
+    const currentJournals = newParams.getAll('journal')
+
+    if (currentJournals.includes(journal)) {
+      // Remove if already selected
+      newParams.delete('journal')
+      currentJournals.filter(j => j !== journal).forEach(j => newParams.append('journal', j))
+    } else {
+      // Add new journal
+      newParams.append('journal', journal)
+    }
+
+    if (isHomePage) {
+      setSearchParams(newParams)
+    } else {
+      navigate(`/?${newParams.toString()}`)
+    }
+  }
+
+  const handleSidebarYearFilter = (year: number) => {
+    // Toggle year filter (add or remove)
+    const newParams = new URLSearchParams(searchParams)
+    const currentYear = newParams.get('year')
+
+    if (currentYear === year.toString()) {
+      // Remove if already selected
+      newParams.delete('year')
+    } else {
+      // Set new year (single year selection)
+      newParams.set('year', year.toString())
+    }
+
+    if (isHomePage) {
+      setSearchParams(newParams)
+    } else {
+      navigate(`/?${newParams.toString()}`)
+    }
+  }
 
   return (
     <div className="h-screen bg-slate-50 flex flex-col overflow-hidden">
@@ -64,12 +110,29 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Content - 使用 flex-1 和 overflow-hidden 避免外部滚动，但允许 Outlet 内部滚动 */}
-      <main className="flex-1 w-full px-4 sm:px-6 lg:px-8 py-4 overflow-hidden">
-        <div className="h-full max-w-[1800px] mx-auto animate-fade-in overflow-y-auto scrollbar-smooth">
-          <Outlet />
-        </div>
-      </main>
+      {/* Main Content with Sidebar */}
+      <div className="flex-1 flex overflow-hidden">
+        {/* Sidebar - Only show on home page */}
+        {isHomePage && (
+          <Sidebar
+            onFilterByJournal={handleSidebarJournalFilter}
+            onFilterByYear={handleSidebarYearFilter}
+            isCollapsed={isSidebarCollapsed}
+            onToggleCollapse={() => setIsSidebarCollapsed(!isSidebarCollapsed)}
+            selectedJournals={searchParams.getAll('journal')}
+            selectedYear={searchParams.get('year') ? parseInt(searchParams.get('year')!) : undefined}
+          />
+        )}
+
+        {/* Main Content Area */}
+        <main className={`flex-1 overflow-hidden bg-slate-50/50 ${isHomePage ? 'border-l border-slate-200/60' : ''}`}>
+          <div className="h-full overflow-y-auto scrollbar-smooth">
+            <div className="p-5 sm:p-6 lg:p-8 animate-fade-in">
+              <Outlet />
+            </div>
+          </div>
+        </main>
+      </div>
 
       {/* Toast Notifications */}
       <Toaster

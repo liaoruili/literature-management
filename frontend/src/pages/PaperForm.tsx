@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { papersApi } from '../services/api'
-import { X, Upload, Save, Link as LinkIcon, Plus, Trash2, Package, Eye, Download, File, FileText as FileTextIcon, Code, ChevronDown, ChevronUp, Check, Edit3 } from 'lucide-react'
+import { X, Save, Link as LinkIcon, Plus, Package, Download, File, FileText as FileTextIcon, ChevronDown, ChevronUp, Check, Edit3, Code, AlertCircle } from 'lucide-react'
 import { toast } from 'sonner'
 
 interface PaperFile {
@@ -53,7 +53,9 @@ export default function PaperForm() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const queryClient = useQueryClient()
+  const [searchParams] = useSearchParams()
   const isEditMode = !!id
+  const doiFromUrl = searchParams.get('doi') || ''
 
   const [formData, setFormData] = useState({
     title: '',
@@ -76,6 +78,30 @@ export default function PaperForm() {
   const [editFileCategory, setEditFileCategory] = useState('')
   const [editFileDescription, setEditFileDescription] = useState('')
   const [showFilesSection, setShowFilesSection] = useState(true)
+  const [doiCheckResult, setDoiCheckResult] = useState<{ exists: boolean; message: string; paper_id?: string; title?: string } | null>(null)
+
+  // Check DOI existence mutation
+  const checkDoiMutation = useMutation({
+    mutationFn: (doi: string) => papersApi.checkDoi(doi).then((res) => res.data),
+    onSuccess: (data) => {
+      setDoiCheckResult(data)
+      if (data.exists) {
+        toast.error('该文献已存在，无法重复添加', {
+          description: data.title,
+          duration: 4000,
+        })
+      } else {
+        // DOI doesn't exist, proceed to fetch metadata
+        fetchDoiMutation.mutate(formData.doi.trim())
+      }
+    },
+    onError: (error: any) => {
+      toast.error('检查 DOI 失败', {
+        description: error.response?.data?.detail || '请稍后重试',
+        duration: 4000,
+      })
+    },
+  })
 
   const fetchDoiMutation = useMutation({
     mutationFn: (doi: string) => papersApi.fetchDoi(doi).then((res) => res.data),
@@ -98,12 +124,26 @@ export default function PaperForm() {
           : formData.keywords,
         url: data.url || formData.url,
       })
-      alert('元信息已成功填充！')
+      setDoiCheckResult(null)
+      toast.success('元信息已成功填充！')
     },
     onError: (error: any) => {
-      alert('无法通过 DOI 获取元信息：' + (error.response?.data?.detail || '请检查 DOI 是否正确'))
+      toast.error('无法通过 DOI 获取元信息', {
+        description: error.response?.data?.detail || '请检查 DOI 是否正确',
+        duration: 4000,
+      })
     },
   })
+
+  const handleDoiAutoFill = () => {
+    const doi = formData.doi.trim()
+    if (!doi) {
+      toast.error('请先输入 DOI')
+      return
+    }
+    // First check if DOI exists
+    checkDoiMutation.mutate(doi)
+  }
 
   const { data: existingPaper } = useQuery({
     queryKey: ['paper', id],
@@ -132,6 +172,17 @@ export default function PaperForm() {
       })
     },
   })
+
+  // Handle DOI from URL (quick add)
+  useEffect(() => {
+    if (doiFromUrl && !isEditMode) {
+      setFormData(prev => ({ ...prev, doi: doiFromUrl }))
+      // Auto-trigger DOI check and fetch
+      setTimeout(() => {
+        checkDoiMutation.mutate(doiFromUrl)
+      }, 100)
+    }
+  }, [doiFromUrl, isEditMode])
 
   useEffect(() => {
     if (existingPaper && isEditMode) {
@@ -409,28 +460,39 @@ export default function PaperForm() {
                     <input
                       type="text"
                       value={formData.doi}
-                      onChange={(e) => setFormData({ ...formData, doi: e.target.value })}
-                      className="academic-input"
+                      onChange={(e) => {
+                        setFormData({ ...formData, doi: e.target.value })
+                        setDoiCheckResult(null) // Clear check result when DOI changes
+                      }}
+                      className={`academic-input ${doiCheckResult?.exists ? 'border-rose-300 focus:border-rose-500 focus:ring-rose-500/20' : ''}`}
                       placeholder="10.1000/xxx"
                     />
                     <button
                       type="button"
-                      onClick={() => {
-                        if (formData.doi.trim()) {
-                          fetchDoiMutation.mutate(formData.doi.trim())
-                        } else {
-                          alert('请先输入 DOI')
-                        }
-                      }}
-                      disabled={fetchDoiMutation.isPending || !formData.doi.trim()}
+                      onClick={handleDoiAutoFill}
+                      disabled={checkDoiMutation.isPending || fetchDoiMutation.isPending || !formData.doi.trim()}
                       className="btn-secondary whitespace-nowrap"
                       title="通过 DOI 自动填充元信息"
                     >
                       <LinkIcon className="h-4 w-4" />
-                      {fetchDoiMutation.isPending ? '获取中...' : '自动填充'}
+                      {checkDoiMutation.isPending || fetchDoiMutation.isPending ? '获取中...' : '自动填充'}
                     </button>
                   </div>
-                  <p className="text-xs text-slate-400 mt-1.5">点击"自动填充"可从 Crossref 获取元信息</p>
+                  {doiCheckResult?.exists ? (
+                    <div className="flex items-center gap-1.5 mt-1.5 text-xs text-rose-600">
+                      <AlertCircle className="h-3.5 w-3.5" />
+                      <span>该文献已存在，无法重复添加</span>
+                      <button
+                        type="button"
+                        onClick={() => navigate(`/papers/${doiCheckResult.paper_id}`)}
+                        className="text-blue-600 hover:text-blue-700 underline ml-1"
+                      >
+                        查看文献
+                      </button>
+                    </div>
+                  ) : (
+                    <p className="text-xs text-slate-400 mt-1.5">点击"自动填充"可从 Crossref 获取元信息</p>
+                  )}
                 </div>
                 <div>
                   <label className="block text-sm font-semibold text-slate-700 mb-2">

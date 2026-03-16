@@ -11,7 +11,7 @@ export const api = axios.create({
 
 // Papers API
 export const papersApi = {
-  list: (params?: { page?: number; page_size?: number; journal?: string; year?: number }) =>
+  list: (params?: { page?: number; page_size?: number; journal?: string | string[]; year?: number; has_pdf?: boolean }) =>
     api.get('/papers', { params }),
 
   get: (id: string) => api.get(`/papers/${id}`),
@@ -24,7 +24,11 @@ export const papersApi = {
 
   getBibtex: (id: string) => api.get(`/papers/${id}/bib`),
 
+  checkDoi: (doi: string) => api.get('/papers/check-doi', { params: { doi } }),
+
   fetchDoi: (doi: string) => api.get('/papers/fetch-doi', { params: { doi } }),
+
+  getDoiDiff: (id: string, doi: string) => api.get(`/papers/${id}/doi-diff`, { params: { doi } }),
 
   uploadPdf: (id: string, file: File) => {
     const formData = new FormData()

@@ -47,3 +47,9 @@ export interface Journal {
   update_frequency_days: number
   created_at: string
 }
+
+export interface FieldDiff {
+  field: string
+  current_value: string | null
+  new_value: string | null
+}

@@ -23,6 +23,7 @@ import {
 } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useState, useEffect } from 'react'
+import type { FieldDiff } from '../types'
 import { toast } from 'sonner'
 import PaperNotes from '../components/PaperNotes'
 import PaperFiles from '../components/PaperFiles'
@@ -50,6 +51,11 @@ export default function PaperDetail() {
     abstract: '',
     keywords: '',
   })
+  // DOI diff confirmation dialog state
+  const [showDoiDiffDialog, setShowDoiDiffDialog] = useState(false)
+  const [doiDifferences, setDoiDifferences] = useState<FieldDiff[]>([])
+  const [selectedFields, setSelectedFields] = useState<Set<string>>(new Set())
+  const [doiNewData, setDoiNewData] = useState<any>(null)
   const queryClient = useQueryClient()
 
   useEffect(() => {
@@ -95,27 +101,67 @@ export default function PaperDetail() {
     },
   })
 
-  const refetchDoiMutation = useMutation({
+  // Check DOI differences before updating
+  const checkDoiDiffMutation = useMutation({
     mutationFn: async () => {
-      // 先获取DOI信息
-      const doiResponse = await papersApi.fetchDoi(paper?.doi!)
-      // 然后更新文献信息
-      await papersApi.update(id!, {
-        title: doiResponse.data.title,
-        authors: doiResponse.data.authors,
-        journal: doiResponse.data.journal,
-        year: doiResponse.data.year,
-        volume: doiResponse.data.volume,
-        number: doiResponse.data.number,
-        pages: doiResponse.data.pages,
-        abstract: doiResponse.data.abstract,
-        keywords: doiResponse.data.keywords,
+      const response = await papersApi.getDoiDiff(id!, paper?.doi!)
+      return response.data
+    },
+    onSuccess: (data) => {
+      if (data.has_differences) {
+        // Show confirmation dialog with differences
+        setDoiDifferences(data.differences)
+        setDoiNewData(data.new_data)
+        // Default select all fields with differences
+        setSelectedFields(new Set(data.differences.map((d: FieldDiff) => d.field)))
+        setShowDoiDiffDialog(true)
+      } else {
+        // No differences, just show success message
+        toast.info('DOI 元数据检查完成', {
+          description: '当前数据已与 DOI 源同步，无需更新',
+          duration: 3000,
+        })
+      }
+    },
+    onError: (error: any) => {
+      toast.error('检查 DOI 差异失败', {
+        description: error.response?.data?.detail || '无法获取 DOI 元数据',
+        duration: 4000,
       })
-      return doiResponse.data
+    },
+  })
+
+  // Apply selected DOI updates
+  const applyDoiUpdatesMutation = useMutation({
+    mutationFn: async () => {
+      if (!doiNewData) return
+
+      // Build update data based on selected fields
+      const updateData: any = {}
+      
+      if (selectedFields.has('title')) updateData.title = doiNewData.title
+      if (selectedFields.has('authors')) updateData.authors = doiNewData.authors
+      if (selectedFields.has('journal')) updateData.journal = doiNewData.journal
+      if (selectedFields.has('year')) updateData.year = doiNewData.year
+      if (selectedFields.has('volume')) updateData.volume = doiNewData.volume
+      if (selectedFields.has('number')) updateData.number = doiNewData.number
+      if (selectedFields.has('pages')) updateData.pages = doiNewData.pages
+      if (selectedFields.has('abstract')) updateData.abstract = doiNewData.abstract
+      if (selectedFields.has('keywords')) updateData.keywords = doiNewData.keywords
+
+      if (Object.keys(updateData).length > 0) {
+        await papersApi.update(id!, updateData)
+      }
+      return updateData
     },
     onSuccess: () => {
-      toast.success('DOI信息已更新', {
-        description: '文献元数据已成功重新拉取',
+      setShowDoiDiffDialog(false)
+      setDoiDifferences([])
+      setSelectedFields(new Set())
+      setDoiNewData(null)
+      
+      toast.success('DOI 信息已更新', {
+        description: `已应用 ${selectedFields.size} 个字段的更新`,
         duration: 3000,
       })
       // 局部刷新文献数据，不整页重载
@@ -123,12 +169,32 @@ export default function PaperDetail() {
       queryClient.invalidateQueries({ queryKey: ['bibtex', id] })
     },
     onError: (error: any) => {
-      toast.error('拉取DOI信息失败', {
-        description: error.response?.data?.detail || '无法获取DOI元数据',
+      toast.error('更新失败', {
+        description: error.response?.data?.detail || '无法保存更新',
         duration: 4000,
       })
     },
   })
+
+  const handleDoiFieldToggle = (field: string) => {
+    setSelectedFields(prev => {
+      const newSet = new Set(prev)
+      if (newSet.has(field)) {
+        newSet.delete(field)
+      } else {
+        newSet.add(field)
+      }
+      return newSet
+    })
+  }
+
+  const handleSelectAllFields = () => {
+    setSelectedFields(new Set(doiDifferences.map(d => d.field)))
+  }
+
+  const handleDeselectAllFields = () => {
+    setSelectedFields(new Set())
+  }
 
   const handleDelete = () => {
     setShowDeleteConfirm(true)
@@ -497,12 +563,12 @@ export default function PaperDetail() {
                   </button>
                   {paper.doi && (
                     <button
-                      onClick={() => refetchDoiMutation.mutate()}
-                      disabled={refetchDoiMutation.isPending}
+                      onClick={() => checkDoiDiffMutation.mutate()}
+                      disabled={checkDoiDiffMutation.isPending}
                       className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
                     >
-                      <RefreshCw className={`h-3.5 w-3.5 ${refetchDoiMutation.isPending ? 'animate-spin' : ''}`} />
-                      {refetchDoiMutation.isPending ? '拉取中...' : '重新拉取DOI'}
+                      <RefreshCw className={`h-3.5 w-3.5 ${checkDoiDiffMutation.isPending ? 'animate-spin' : ''}`} />
+                      {checkDoiDiffMutation.isPending ? '检查中...' : '重新拉取DOI'}
                     </button>
                   )}
                   <button
@@ -716,12 +782,12 @@ export default function PaperDetail() {
                     </button>
                     {paper.doi && (
                       <button
-                        onClick={() => refetchDoiMutation.mutate()}
-                        disabled={refetchDoiMutation.isPending}
+                        onClick={() => checkDoiDiffMutation.mutate()}
+                        disabled={checkDoiDiffMutation.isPending}
                         className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 rounded-lg text-sm font-medium transition-colors disabled:opacity-50"
                       >
-                        <RefreshCw className={`h-3.5 w-3.5 ${refetchDoiMutation.isPending ? 'animate-spin' : ''}`} />
-                        {refetchDoiMutation.isPending ? '拉取中...' : '重新拉取DOI'}
+                        <RefreshCw className={`h-3.5 w-3.5 ${checkDoiDiffMutation.isPending ? 'animate-spin' : ''}`} />
+                        {checkDoiDiffMutation.isPending ? '检查中...' : '重新拉取DOI'}
                       </button>
                     )}
                     <button
@@ -1052,6 +1118,133 @@ export default function PaperDetail() {
                   className="flex-1 px-4 py-2.5 text-sm font-medium text-white bg-rose-600 hover:bg-rose-700 rounded-xl transition-colors disabled:opacity-50"
                 >
                   {deleteMutation.isPending ? '删除中...' : '确认删除'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* DOI Diff Confirmation Modal */}
+      {showDoiDiffDialog && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          {/* Backdrop */}
+          <div
+            className="absolute inset-0 bg-slate-900/50 backdrop-blur-sm"
+            onClick={() => setShowDoiDiffDialog(false)}
+          />
+          {/* Modal */}
+          <div className="relative bg-white rounded-2xl shadow-2xl max-w-2xl w-full max-h-[80vh] flex flex-col animate-fade-in">
+            {/* Header */}
+            <div className="flex items-center justify-between p-6 border-b border-slate-200">
+              <div>
+                <h3 className="text-lg font-semibold text-slate-900">
+                  检测到 DOI 元数据更新
+                </h3>
+                <p className="text-sm text-slate-500 mt-1">
+                  以下字段有新值，请选择要应用的更新
+                </p>
+              </div>
+              <button
+                onClick={() => setShowDoiDiffDialog(false)}
+                className="p-2 hover:bg-slate-100 rounded-lg transition-colors"
+              >
+                <X className="h-5 w-5 text-slate-400" />
+              </button>
+            </div>
+
+            {/* Select All / Deselect All */}
+            <div className="flex gap-2 px-6 py-3 bg-slate-50 border-b border-slate-200">
+              <button
+                onClick={handleSelectAllFields}
+                className="text-xs font-medium text-blue-600 hover:text-blue-700"
+              >
+                全选
+              </button>
+              <span className="text-slate-300">|</span>
+              <button
+                onClick={handleDeselectAllFields}
+                className="text-xs font-medium text-slate-600 hover:text-slate-700"
+              >
+                取消全选
+              </button>
+            </div>
+
+            {/* Differences List */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-3">
+              {doiDifferences.map((diff) => (
+                <div
+                  key={diff.field}
+                  className={`border rounded-xl p-4 transition-all ${
+                    selectedFields.has(diff.field)
+                      ? 'border-blue-200 bg-blue-50/50'
+                      : 'border-slate-200 bg-white'
+                  }`}
+                >
+                  <label className="flex items-start gap-3 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selectedFields.has(diff.field)}
+                      onChange={() => handleDoiFieldToggle(diff.field)}
+                      className="mt-1 h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 mb-2">
+                        <span className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
+                          {diff.field === 'title' && '标题'}
+                          {diff.field === 'authors' && '作者'}
+                          {diff.field === 'journal' && '期刊'}
+                          {diff.field === 'year' && '年份'}
+                          {diff.field === 'volume' && '卷'}
+                          {diff.field === 'number' && '期'}
+                          {diff.field === 'pages' && '页码'}
+                          {diff.field === 'abstract' && '摘要'}
+                          {diff.field === 'keywords' && '关键词'}
+                        </span>
+                        {selectedFields.has(diff.field) && (
+                          <span className="text-xs text-blue-600 font-medium">
+                            将更新
+                          </span>
+                        )}
+                      </div>
+                      <div className="space-y-2">
+                        <div className="text-sm">
+                          <span className="text-slate-400">当前值：</span>
+                          <span className="text-slate-600 line-through">
+                            {diff.current_value || '(空)'}
+                          </span>
+                        </div>
+                        <div className="text-sm">
+                          <span className="text-emerald-600 font-medium">新值：</span>
+                          <span className="text-slate-900">
+                            {diff.new_value || '(空)'}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              ))}
+            </div>
+
+            {/* Footer */}
+            <div className="flex items-center justify-between p-6 border-t border-slate-200">
+              <span className="text-sm text-slate-500">
+                已选择 {selectedFields.size} / {doiDifferences.length} 个字段
+              </span>
+              <div className="flex gap-3">
+                <button
+                  onClick={() => setShowDoiDiffDialog(false)}
+                  className="px-4 py-2.5 text-sm font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-xl transition-colors"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => applyDoiUpdatesMutation.mutate()}
+                  disabled={selectedFields.size === 0 || applyDoiUpdatesMutation.isPending}
+                  className="px-4 py-2.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-colors disabled:opacity-50"
+                >
+                  {applyDoiUpdatesMutation.isPending ? '应用中...' : '应用更新'}
                 </button>
               </div>
             </div>

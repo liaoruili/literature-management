@@ -110,7 +110,7 @@ async def upload_file(
         'file_size': file_size,
         'description': description,
         'category': category,
-        'file_path': str(file_path),
+        'file_path': relative_path,
     }
 
 
@@ -201,6 +201,104 @@ async def delete_file(
     """), {'file_id': str(file_id), 'paper_id': str(paper_id)})
     
     await db.commit()
+
+
+@router.put("/{paper_id}/files/{file_id}", response_model=dict)
+async def update_file(
+    paper_id: uuid.UUID,
+    file_id: uuid.UUID,
+    data: dict,
+    db: DbSession = None,
+    paper: PaperDependency = None,
+) -> dict:
+    """Update file metadata (original_filename, description, category)."""
+    from pydantic import BaseModel
+    
+    class FileUpdateRequest(BaseModel):
+        original_filename: str | None = None
+        description: str | None = None
+        category: str | None = None
+    
+    # Validate request data
+    try:
+        update_data = FileUpdateRequest(**data)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid request data: {str(e)}"
+        )
+    
+    # Check if file exists
+    result = await db.execute(text("""
+        SELECT id FROM paper_files
+        WHERE id = :file_id AND paper_id = :paper_id
+    """), {'file_id': str(file_id), 'paper_id': str(paper_id)})
+    
+    if not result.fetchone():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found"
+        )
+    
+    # Build update query dynamically
+    update_fields = []
+    params = {'file_id': str(file_id), 'paper_id': str(paper_id)}
+    
+    if update_data.original_filename is not None:
+        update_fields.append("original_filename = :original_filename")
+        params['original_filename'] = update_data.original_filename
+    
+    if update_data.description is not None:
+        update_fields.append("description = :description")
+        params['description'] = update_data.description
+    
+    if update_data.category is not None:
+        if update_data.category not in ALLOWED_CATEGORIES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid category. Must be one of: {', '.join(ALLOWED_CATEGORIES)}"
+            )
+        update_fields.append("category = :category")
+        params['category'] = update_data.category
+    
+    if not update_fields:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No fields to update"
+        )
+    
+    # Execute update
+    await db.execute(text(f"""
+        UPDATE paper_files
+        SET {', '.join(update_fields)}, updated_at = :updated_at
+        WHERE id = :file_id AND paper_id = :paper_id
+    """), {**params, 'updated_at': datetime.utcnow()})
+    
+    await db.commit()
+    
+    # Return updated file info
+    result = await db.execute(text("""
+        SELECT id, paper_id, filename, original_filename, file_type, 
+               file_size, description, category, file_path, created_at, updated_at
+        FROM paper_files
+        WHERE id = :file_id AND paper_id = :paper_id
+    """), {'file_id': str(file_id), 'paper_id': str(paper_id)})
+    
+    row = result.fetchone()
+    
+    return {
+        'id': str(row.id),
+        'paper_id': str(row.paper_id),
+        'filename': row.filename,
+        'original_filename': row.original_filename,
+        'file_type': row.file_type,
+        'file_size': row.file_size,
+        'description': row.description,
+        'category': row.category,
+        'file_path': row.file_path,
+        'created_at': row.created_at.isoformat() if row.created_at else None,
+        'updated_at': row.updated_at.isoformat() if row.updated_at else None,
+    }
 
 
 @router.get("/{paper_id}/files/{file_id}/download")

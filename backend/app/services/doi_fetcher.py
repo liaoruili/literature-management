@@ -157,7 +157,7 @@ class DOIMetadataFetcher:
         # Extract keywords
         keywords = []
         if 'subject' in message:
-            keywords = [{'name': subj} for subj in message['subject'][:5]]  # Limit to 5
+            keywords = message['subject'][:5]  # Limit to 5, return as list of strings
         
         # Extract URL
         url = ''

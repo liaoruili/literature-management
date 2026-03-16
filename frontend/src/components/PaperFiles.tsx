@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useCallback } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { papersApi } from '../services/api'
 import { Upload, File, Trash2, Download, FileText, Code, Package, X, Eye, FileArchive, Loader2, CheckCircle2, CloudUpload, ChevronDown, ChevronUp, Edit2, Check, AlertTriangle } from 'lucide-react'
@@ -60,23 +60,49 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
   const [editFilename, setEditFilename] = useState('')
   const [editDescription, setEditDescription] = useState('')
   const [deleteConfirmFile, setDeleteConfirmFile] = useState<PaperFile | null>(null)
+  // Drag and drop states
+  const [isDragging, setIsDragging] = useState(false)
+  const dragCounter = useRef(0)
+  const dropZoneRef = useRef<HTMLDivElement>(null)
 
   const { data: filesData } = useQuery({
     queryKey: ['paper-files', paperId],
     queryFn: () => papersApi.getFiles(paperId).then((res) => res.data),
   })
 
+  // Load last viewed file from localStorage
   useEffect(() => {
     if (filesData?.items && !selectedFileId) {
-      const pdfFiles = filesData.items.filter((f: PaperFile) => f.category === 'pdf')
-      if (pdfFiles.length > 0) {
-        const sortedPdfs = [...pdfFiles].sort((a, b) =>
-          new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
-        )
-        onFileSelect(sortedPdfs[0].id)
+      // Try to get last viewed file from localStorage
+      const storageKey = `lastViewedFile_${paperId}`
+      const lastViewedFileId = localStorage.getItem(storageKey)
+
+      // Check if last viewed file still exists in current files
+      const fileExists = lastViewedFileId && filesData.items.some((f: PaperFile) => f.id === lastViewedFileId)
+
+      if (fileExists) {
+        // Use last viewed file
+        onFileSelect(lastViewedFileId)
+      } else {
+        // Fallback: select the most recently uploaded PDF
+        const pdfFiles = filesData.items.filter((f: PaperFile) => f.category === 'pdf')
+        if (pdfFiles.length > 0) {
+          const sortedPdfs = [...pdfFiles].sort((a, b) =>
+            new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
+          )
+          onFileSelect(sortedPdfs[0].id)
+        }
       }
     }
-  }, [filesData, selectedFileId, onFileSelect])
+  }, [filesData, selectedFileId, onFileSelect, paperId])
+
+  // Save last viewed file to localStorage when user selects a file
+  useEffect(() => {
+    if (selectedFileId) {
+      const storageKey = `lastViewedFile_${paperId}`
+      localStorage.setItem(storageKey, selectedFileId)
+    }
+  }, [selectedFileId, paperId])
 
   const uploadMutation = useMutation({
     mutationFn: ({ paperId, file, category, description }: {
@@ -96,12 +122,17 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
         description: response.data?.original_filename || '文件已上传',
         duration: 3000,
       })
+      // Ensure file list is expanded to show new file
+      setIsExpanded(true)
       setTimeout(() => {
         queryClient.invalidateQueries({ queryKey: ['paper-files', paperId] })
         resetForm()
         setShowUploadForm(false)
         setUploadSuccess(false)
         setUploadProgress(0)
+        // Clear drag state
+        dragCounter.current = 0
+        setIsDragging(false)
         if (response.data?.category === 'pdf') {
           onFileSelect(response.data.id)
         }
@@ -173,6 +204,9 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
       return
     }
 
+    // Expand file list before upload to show the new file after upload completes
+    setIsExpanded(true)
+
     uploadMutation.mutate({
       paperId,
       file: selectedFile,
@@ -241,6 +275,128 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
     return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i]
   }
 
+  // Auto-detect file category based on file extension and type
+  const detectFileCategory = (file: File): string => {
+    const filename = file.name.toLowerCase()
+    const fileType = file.type.toLowerCase()
+
+    // PDF files
+    if (fileType.includes('pdf') || filename.endsWith('.pdf')) {
+      return 'pdf'
+    }
+
+    // Code files
+    const codeExtensions = ['.py', '.js', '.ts', '.jsx', '.tsx', '.r', '.m', '.mat', '.do', '.sas', '.sql', '.sh', '.bash', '.zsh', '.ps1', '.bat', '.cmd']
+    if (codeExtensions.some(ext => filename.endsWith(ext)) || fileType.includes('text') || fileType.includes('script')) {
+      return 'code'
+    }
+
+    // Supplementary data files
+    const dataExtensions = ['.csv', '.xlsx', '.xls', '.json', '.xml', '.dta', '.sav', '.por', '.sas7bdat']
+    if (dataExtensions.some(ext => filename.endsWith(ext)) || fileType.includes('spreadsheet') || fileType.includes('csv')) {
+      return 'supplementary_data'
+    }
+
+    // Default to other
+    return 'other'
+  }
+
+  // Handle drag events
+  const handleDragEnter = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current++
+    if (e.dataTransfer.types.includes('Files')) {
+      setIsDragging(true)
+    }
+  }, [])
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current--
+    if (dragCounter.current === 0) {
+      setIsDragging(false)
+    }
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (e.dataTransfer.types.includes('Files')) {
+      e.dataTransfer.dropEffect = 'copy'
+    }
+  }, [])
+
+  const validateFile = (file: File): { valid: boolean; error?: string } => {
+    // Check file size (max 50MB)
+    const maxSize = 50 * 1024 * 1024
+    if (file.size > maxSize) {
+      return { valid: false, error: `文件大小超过 50MB 限制 (${formatFileSize(file.size)})` }
+    }
+
+    // Check file type (allow common academic file types)
+    const allowedTypes = [
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/plain',
+      'text/csv',
+      'application/json',
+      'application/zip',
+      'application/x-zip-compressed',
+    ]
+    const allowedExtensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.txt', '.csv', '.json', '.zip', '.py', '.js', '.ts', '.r', '.m', '.do', '.sas', '.sql']
+
+    const filename = file.name.toLowerCase()
+    const hasAllowedExtension = allowedExtensions.some(ext => filename.endsWith(ext))
+    const hasAllowedType = allowedTypes.some(type => file.type.includes(type))
+
+    if (!hasAllowedExtension && !hasAllowedType) {
+      return { valid: false, error: `不支持的文件格式: ${file.type || '未知'}` }
+    }
+
+    return { valid: true }
+  }
+
+  const processFiles = useCallback((files: FileList | null) => {
+    if (!files || files.length === 0) return
+
+    const file = files[0] // Handle single file upload for now
+    const validation = validateFile(file)
+
+    if (!validation.valid) {
+      toast.error('文件验证失败', {
+        description: validation.error,
+        duration: 4000,
+      })
+      return
+    }
+
+    // Auto-detect category
+    const detectedCategory = detectFileCategory(file)
+    setSelectedCategory(detectedCategory)
+    setSelectedFile(file)
+    setShowUploadForm(true)
+
+    toast.success('文件已选择', {
+      description: `${file.name} (${formatFileSize(file.size)})，请确认信息后点击上传`,
+      duration: 3000,
+    })
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragCounter.current = 0
+    setIsDragging(false)
+
+    const files = e.dataTransfer.files
+    processFiles(files)
+  }, [processFiles])
+
   const files = filesData?.items || []
 
   const groupedFiles = files.reduce((acc: Record<string, PaperFile[]>, file: PaperFile) => {
@@ -255,7 +411,31 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
 
   if (compact) {
     return (
-      <div className="h-full flex flex-col bg-white rounded-xl border border-slate-200/60 overflow-hidden">
+      <div
+        ref={dropZoneRef}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+        className={`
+          h-full flex flex-col bg-white rounded-xl border overflow-hidden transition-all duration-300
+          ${isDragging
+            ? 'border-blue-500 border-2 shadow-lg shadow-blue-500/20 bg-blue-50/30'
+            : 'border-slate-200/60'
+          }
+        `}
+      >
+        {/* Drag Overlay */}
+        {isDragging && (
+          <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-blue-500/10 backdrop-blur-sm rounded-xl m-2">
+            <div className="h-16 w-16 bg-blue-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-blue-500/30 animate-bounce">
+              <CloudUpload className="h-8 w-8 text-white" />
+            </div>
+            <p className="text-lg font-semibold text-blue-700">释放以上传</p>
+            <p className="text-sm text-blue-500 mt-1">支持 PDF、数据文件、代码等</p>
+          </div>
+        )}
+
         {/* Header */}
         <div className="flex items-center justify-between p-3 border-b border-slate-100 bg-slate-50/50">
           <div className="flex items-center gap-2">
@@ -265,7 +445,14 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
             <span className="font-semibold text-slate-900 text-sm">附件</span>
           </div>
           <button
-            onClick={() => setShowUploadForm(!showUploadForm)}
+            onClick={() => {
+              const newShowUploadForm = !showUploadForm
+              setShowUploadForm(newShowUploadForm)
+              // Expand file list when opening upload form
+              if (newShowUploadForm) {
+                setIsExpanded(true)
+              }
+            }}
             disabled={uploadMutation.isPending}
             className={`
               group relative inline-flex items-center gap-2 px-4 py-2 rounded-xl font-medium text-sm
@@ -318,12 +505,44 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
         {/* Compact Upload Form */}
         {showUploadForm && (
           <div className="p-3 border-b border-slate-100 bg-slate-50 space-y-2 animate-fade-in">
-            <input
-              ref={fileInputRef}
-              type="file"
-              onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
-              className="text-xs w-full file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-600 hover:file:bg-blue-100"
-            />
+            {/* Drag hint */}
+            <div className="text-xs text-slate-500 text-center py-2 border border-dashed border-slate-300 rounded-lg bg-slate-100/50">
+              <CloudUpload className="h-4 w-4 mx-auto mb-1 text-slate-400" />
+              或将文件拖拽到此处上传
+            </div>
+
+            {/* File Selection Display */}
+            {selectedFile ? (
+              <div className="flex items-center gap-2 p-2 bg-blue-50 border border-blue-200 rounded-lg">
+                <FileArchive className="h-4 w-4 text-blue-500 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-medium text-slate-700 truncate" title={selectedFile.name}>
+                    {selectedFile.name}
+                  </p>
+                  <p className="text-[10px] text-slate-500">
+                    {formatFileSize(selectedFile.size)} · {CATEGORY_LABELS[selectedCategory]}
+                  </p>
+                </div>
+                <button
+                  onClick={() => {
+                    setSelectedFile(null)
+                    if (fileInputRef.current) fileInputRef.current.value = ''
+                  }}
+                  className="p-1 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded transition-colors"
+                  title="清除选择"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            ) : (
+              <input
+                ref={fileInputRef}
+                type="file"
+                onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                className="text-xs w-full file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-600 hover:file:bg-blue-100"
+              />
+            )}
+
             <select
               value={selectedCategory}
               onChange={(e) => setSelectedCategory(e.target.value)}
@@ -359,6 +578,7 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
             <div className="text-center py-6 text-slate-400 text-xs">
               <Package className="mx-auto h-6 w-6 text-slate-300 mb-2" />
               暂无文件
+              <p className="text-[10px] text-slate-300 mt-1">拖拽文件到此处上传</p>
             </div>
           ) : (
             categoryOrder.map((category) => {
@@ -405,7 +625,32 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
 
   // Full mode
   return (
-    <div className="bg-white rounded-2xl border border-slate-200/60 shadow-sm overflow-hidden">
+    <div
+      ref={dropZoneRef}
+      onDragEnter={handleDragEnter}
+      onDragLeave={handleDragLeave}
+      onDragOver={handleDragOver}
+      onDrop={handleDrop}
+      className={`
+        bg-white rounded-2xl border shadow-sm overflow-hidden transition-all duration-300 relative
+        ${isDragging
+          ? 'border-blue-500 border-2 shadow-lg shadow-blue-500/20'
+          : 'border-slate-200/60'
+        }
+      `}
+    >
+      {/* Drag Overlay */}
+      {isDragging && (
+        <div className="absolute inset-0 z-50 flex flex-col items-center justify-center bg-blue-500/10 backdrop-blur-sm rounded-2xl m-4">
+          <div className="h-20 w-20 bg-blue-500 rounded-2xl flex items-center justify-center mb-4 shadow-lg shadow-blue-500/30 animate-bounce">
+            <CloudUpload className="h-10 w-10 text-white" />
+          </div>
+          <p className="text-xl font-semibold text-blue-700">释放以上传</p>
+          <p className="text-sm text-blue-500 mt-2">支持 PDF、数据文件、代码等格式</p>
+          <p className="text-xs text-blue-400 mt-1">最大 50MB</p>
+        </div>
+      )}
+
       {/* Header - 压缩高度 */}
       <div className="flex items-center justify-between p-3 border-b border-slate-100">
         <div className="flex items-center gap-2">
@@ -438,7 +683,14 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
             </button>
           )}
           <button
-            onClick={() => setShowUploadForm(!showUploadForm)}
+            onClick={() => {
+              const newShowUploadForm = !showUploadForm
+              setShowUploadForm(newShowUploadForm)
+              // Expand file list when opening upload form
+              if (newShowUploadForm) {
+                setIsExpanded(true)
+              }
+            }}
             disabled={uploadMutation.isPending}
             className={`
               group relative inline-flex items-center gap-2 px-3 py-1.5 rounded-lg font-medium text-xs
@@ -493,36 +745,65 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
       {showUploadForm && (
         <div className="p-3 border-b border-slate-100 bg-slate-50/50 animate-fade-in">
           <div className="space-y-3">
+            {/* Drag and drop zone */}
+            <div
+              onDragEnter={handleDragEnter}
+              onDragLeave={handleDragLeave}
+              onDragOver={handleDragOver}
+              onDrop={handleDrop}
+              className={`
+                border-2 border-dashed rounded-xl p-4 text-center transition-all duration-200 cursor-pointer
+                ${isDragging
+                  ? 'border-blue-500 bg-blue-50'
+                  : 'border-slate-300 bg-white hover:border-blue-400 hover:bg-slate-50'
+                }
+              `}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              <CloudUpload className={`h-8 w-8 mx-auto mb-2 ${isDragging ? 'text-blue-500' : 'text-slate-400'}`} />
+              <p className="text-sm font-medium text-slate-700">
+                {isDragging ? '释放以上传' : '点击或拖拽文件到此处'}
+              </p>
+              <p className="text-xs text-slate-500 mt-1">
+                支持 PDF、Word、Excel、代码文件等，最大 50MB
+              </p>
+            </div>
+
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1.5">
                 选择文件
               </label>
-              <div className="flex items-center gap-2">
-                <input
-                  ref={fileInputRef}
-                  type="file"
-                  onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
-                  className="flex-1 text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-600 hover:file:bg-blue-100 transition-colors"
-                />
-                {selectedFile && (
+              {selectedFile ? (
+                <div className="flex items-center gap-2 p-2.5 bg-blue-50 border border-blue-200 rounded-lg">
+                  <FileArchive className="h-4 w-4 text-blue-500 flex-shrink-0" />
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-medium text-slate-700 truncate" title={selectedFile.name}>
+                      {selectedFile.name}
+                    </p>
+                    <p className="text-[10px] text-slate-500">
+                      {formatFileSize(selectedFile.size)} · {CATEGORY_LABELS[selectedCategory]}
+                    </p>
+                  </div>
                   <button
                     onClick={() => {
                       setSelectedFile(null)
                       if (fileInputRef.current) fileInputRef.current.value = ''
                     }}
                     className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors"
-                    title="清除"
+                    title="清除选择"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
-                )}
-              </div>
-              {selectedFile && (
-                <p className="text-xs text-slate-600 mt-1.5 flex items-center gap-1.5">
-                  <FileArchive className="h-3.5 w-3.5 text-slate-400" />
-                  <span className="truncate max-w-[200px]" title={selectedFile.name}>{selectedFile.name}</span>
-                  <span className="text-slate-400">({formatFileSize(selectedFile.size)})</span>
-                </p>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
+                    className="flex-1 text-xs text-slate-600 file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-medium file:bg-blue-50 file:text-blue-600 hover:file:bg-blue-100 transition-colors"
+                  />
+                </div>
               )}
             </div>
 
@@ -579,12 +860,28 @@ export default function PaperFiles({ paperId, selectedFileId, onFileSelect, comp
       {/* Files List - 压缩布局，优化文件名显示 */}
       <div className="p-3">
         {files.length === 0 ? (
-          <div className="text-center py-8">
-            <div className="h-12 w-12 bg-slate-100 rounded-xl flex items-center justify-center mx-auto mb-3">
-              <Package className="h-6 w-6 text-slate-300" />
+          <div
+            onDragEnter={handleDragEnter}
+            onDragLeave={handleDragLeave}
+            onDragOver={handleDragOver}
+            onDrop={handleDrop}
+            className={`
+              text-center py-8 transition-all duration-200 border-2 border-dashed rounded-xl mx-3
+              ${isDragging
+                ? 'border-blue-500 bg-blue-50'
+                : 'border-slate-200 hover:border-slate-300'
+              }
+            `}
+          >
+            <div className={`h-12 w-12 rounded-xl flex items-center justify-center mx-auto mb-3 transition-colors ${isDragging ? 'bg-blue-100' : 'bg-slate-100'}`}>
+              <CloudUpload className={`h-6 w-6 ${isDragging ? 'text-blue-500' : 'text-slate-300'}`} />
             </div>
-            <p className="text-slate-500 text-sm font-medium mb-0.5">还没有上传任何文件</p>
-            <p className="text-xs text-slate-400">点击上方按钮上传文件</p>
+            <p className="text-slate-500 text-sm font-medium mb-0.5">
+              {isDragging ? '释放以上传' : '还没有上传任何文件'}
+            </p>
+            <p className="text-xs text-slate-400">
+              {isDragging ? '支持 PDF、数据文件、代码等' : '点击上方按钮或拖拽文件到此处上传'}
+            </p>
           </div>
         ) : !isExpanded ? (
           // Collapsed view - show only selected PDF or first PDF
